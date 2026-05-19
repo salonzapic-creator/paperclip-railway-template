@@ -16,6 +16,7 @@ RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js
+
 # Runtime image (direct Paperclip server, no wrapper).
 FROM node:22-bookworm
 ENV NODE_ENV=production
@@ -26,6 +27,12 @@ ENV HOME=/paperclip \
     PAPERCLIP_INSTANCE_ID=default \
     PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
     OPENCODE_ALLOW_ALL_MODELS=true
+
+# Fix: pin npm global prefix BEFORE corepack so globals land in /usr/local
+# and ensure that location is always first in PATH.
+ENV npm_config_prefix=/usr/local
+ENV PATH="/usr/local/bin:${PATH}"
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -36,8 +43,10 @@ RUN apt-get update \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
+
 WORKDIR /app
 COPY --from=paperclip-build /paperclip /app
+
 WORKDIR /wrapper
 COPY package.json /wrapper/package.json
 RUN npm install --omit=dev && npm cache clean --force
@@ -45,11 +54,26 @@ COPY src /wrapper/src
 COPY scripts/entrypoint.sh /wrapper/entrypoint.sh
 COPY scripts/bootstrap-ceo.mjs /wrapper/template/bootstrap-ceo.mjs
 RUN chmod +x /wrapper/entrypoint.sh
-# Optional local adapters/tools parity with upstream Dockerfile.
-RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest
-RUN npm install --global --omit=dev tsx
+
+# Install global adapters/tools with explicit prefix so binaries are in /usr/local/bin.
+RUN npm install --global --omit=dev \
+        @anthropic-ai/claude-code@latest \
+        @openai/codex@latest \
+        opencode-ai \
+        @google/gemini-cli@latest \
+        tsx \
+    && npm cache clean --force
+
+# Verify every binary is resolvable before the image is sealed.
+RUN which claude   && claude   --version || true
+RUN which codex    && codex    --version || true
+RUN which opencode && opencode --version || true
+RUN which gemini   && gemini   --version || true
+RUN which tsx      && tsx      --version || true
+
 RUN mkdir -p /paperclip /paperclip/.gemini \
     && chown -R node:node /app /paperclip /wrapper
+
 # Railway sets PORT at runtime and this process binds to it.
 # Entrypoint runs as root, fixes /paperclip volume permissions, then execs as node.
 EXPOSE 3100
